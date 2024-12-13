@@ -11,17 +11,17 @@ class EmberComponent(ABC):
     """
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self._config = config or {}
-        self.initialize()
+        # Remove automatic initialization - let derived classes handle it
+        self._initialized = False
 
     @abstractmethod
     def initialize(self) -> None:
         """Initialize the component with current configuration."""
-        pass
+        self._initialized = True
 
-    @abstractmethod
-    def validate(self) -> bool:
-        """Validate component state and configuration."""
-        pass
+    def is_initialized(self) -> bool:
+        """Check if component has been initialized."""
+        return self._initialized
 
 class GridComponent(EmberComponent):
     """Base class for grid-related components."""

@@ -31,6 +31,7 @@ class GridConfig:
     cylindrical: bool = False   # Cylindrical coordinates flag
     alpha: int = 0             # Geometric power (0=planar, 1=cylindrical)
     
+    beta = 1.0                 # Geometric power (1=planar and cylindrical, 2-axisymmetric)
     # Grid bounds
     grid_min: float = 1e-6     # Minimum grid spacing
     grid_max: float = 1e-3     # Maximum grid spacing
@@ -60,10 +61,15 @@ class OneDimGrid(GridComponent):
         self.cf: np.ndarray = None         # Center coefficients
         self.cfm: np.ndarray = None        # Left coefficients
         self.cfp: np.ndarray = None        # Right coefficients
+        self.hh: np.ndarray = None         # Grid spacing between x[j] and x[j+1]
         
         # Boundary indices
         self.js: int = 0                   # Left boundary index
         self.je: int = 0                   # Right boundary index
+        
+        self.alpha = self.config.alpha
+        self.beta = self.config.beta
+ 
         
         # Initialize the grid
         self.initialize()
@@ -81,6 +87,7 @@ class OneDimGrid(GridComponent):
         self.js = 0
         self.je = len(self.x) - 1
         
+        
         # Compute grid metrics
         self.update_grid_metrics()
 
@@ -91,7 +98,12 @@ class OneDimGrid(GridComponent):
         """
         n = len(self.x)
         
-        # Compute grid spacing
+        # Compute grid spacing between consecutive points (hh)
+        self.hh = np.zeros(n-1)  # One less than number of points
+        for j in range(n-1):
+            self.hh[j] = self.x[j+1] - self.x[j]
+        
+        # Compute general grid spacing (dx)
         self.dx = np.zeros(n)
         self.dx[:-1] = self.x[1:] - self.x[:-1]
         
@@ -102,8 +114,8 @@ class OneDimGrid(GridComponent):
         
         # Interior points (follow Ember's coefficient computation)
         for j in range(1, n-1):
-            hp = self.dx[j]      # spacing to right point
-            hm = self.dx[j-1]    # spacing to left point
+            hp = self.hh[j]      # spacing to right point
+            hm = self.hh[j-1]    # spacing to left point
             
             # Second-order central difference coefficients
             self.cfm[j] = -hp / (hm * (hp + hm))
