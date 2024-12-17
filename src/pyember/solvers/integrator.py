@@ -83,21 +83,36 @@ class TridiagonalSystem(ODESystem):
 class TridiagonalIntegrator(BaseIntegrator):
     """
     Integrator specialized for tridiagonal systems using BDF methods
+    Matches C++ implementation with optimized Python code
     """
     def __init__(self, system: TridiagonalSystem, config: Optional[dict] = None):
         super().__init__(system, config)
         self.system = system
         self.step_count = 0
-        self.y_prev = None
-        self.y_prev2 = None
+        
+        # Arrays for solution history
+        self.y_prev = None  # y_(n-1)
+        
+        # Arrays for Thomas algorithm
+        self.lu_b = None  # Modified diagonal elements
+        self.lu_c = None  # Modified upper diagonal
+        self.lu_d = None  # Modified RHS
+        self.inv_denom = None  # 1/(b[i] - c[i-1]*a[i])
         
     def initialize(self, t0: float, dt: float) -> None:
         """Initialize the integrator"""
         super().initialize(t0, dt)
         self.step_count = 0
+        
         if self.y is not None:
+            N = len(self.y)
+            # Initialize arrays for Thomas algorithm
+            self.lu_b = np.zeros(N)
+            self.lu_c = np.zeros(N)
+            self.lu_d = np.zeros(N)
+            self.inv_denom = np.zeros(N)
             self.y_prev = self.y.copy()
-            self.ydot = self.system.get_rhs(self.t, self.y)
+            
         self._initialized = True
         
     def step(self) -> None:
@@ -106,47 +121,106 @@ class TridiagonalIntegrator(BaseIntegrator):
             raise RuntimeError("Integrator must be initialized before stepping")
             
         if self.step_count == 0:
-            # First step: Use backward Euler (BDF1)
-            # dy/dt = f(t,y)
-            # (y(n+1) - y(n))/dt = f(t(n+1), y(n+1))
+            # First timestep: Take 8 substeps using BDF1
+            self.y_prev = self.y.copy()  # Save current y as y_(n-1)
+            
+            # Get ODE coefficients
             a, b, c = self.system.get_coefficients()
+            k = self.system.get_rhs(self.t, self.y)
             
-            # Build system matrix: (I - dt*J)
-            M = np.eye(len(self.y))
-            for i in range(len(self.y)):
-                if i > 0:
-                    M[i,i-1] = -self.dt * a[i]
-                M[i,i] = 1.0 - self.dt * b[i]
-                if i < len(self.y)-1:
-                    M[i,i+1] = -self.dt * c[i]
+            # Modify diagonal for BDF1
+            sub_dt = self.dt / 8.0
+            self.lu_b = b - 1.0/sub_dt
             
-            self.y_prev = self.y.copy()
-            self.y = np.linalg.solve(M, self.y)
+            # Precompute Thomas algorithm coefficients
+            N = len(self.y)
+            self.lu_c[0] = c[0] / self.lu_b[0]
+            for i in range(1, N):
+                self.inv_denom[i] = 1.0 / (self.lu_b[i] - self.lu_c[i-1] * a[i])
+                self.lu_c[i] = c[i] * self.inv_denom[i]
             
+            # Take 8 substeps
+            for _ in range(8):
+                # RHS for BDF1
+                self.y = -self.y/sub_dt - k
+                
+                # Forward substitution
+                self.lu_d[0] = self.y[0] / self.lu_b[0]
+                for i in range(1, N):
+                    self.lu_d[i] = (self.y[i] - self.lu_d[i-1]*a[i]) * self.inv_denom[i]
+                
+                # Back substitution
+                self.y[N-1] = self.lu_d[N-1]
+                for i in range(N-2, -1, -1):
+                    self.y[i] = self.lu_d[i] - self.lu_c[i] * self.y[i+1]
+                
         else:
-            # Subsequent steps: Use BDF2
-            # (3y(n+1) - 4y(n) + y(n-1))/(2dt) = f(t(n+1), y(n+1))
-            self.y_prev2 = self.y_prev.copy()
-            self.y_prev = self.y.copy()
-            
+            # Get ODE coefficients - needed for all steps
             a, b, c = self.system.get_coefficients()
+            k = self.system.get_rhs(self.t, self.y)
             
-            # Build system matrix: (3I - 2dt*J)
-            M = 3.0 * np.eye(len(self.y))
-            for i in range(len(self.y)):
-                if i > 0:
-                    M[i,i-1] = -2.0 * self.dt * a[i]
-                M[i,i] = 3.0 - 2.0 * self.dt * b[i]
-                if i < len(self.y)-1:
-                    M[i,i+1] = -2.0 * self.dt * c[i]
+            if self.step_count == 1:
+                # Setup for BDF2 - only done once
+                # Modify diagonal elements for BDF2
+                self.lu_b = b - 3.0/(2.0*self.dt)
+                
+                # Precompute Thomas algorithm coefficients
+                N = len(self.y)
+                self.lu_c[0] = c[0] / self.lu_b[0]
+                for i in range(1, N):
+                    self.inv_denom[i] = 1.0 / (self.lu_b[i] - self.lu_c[i-1] * a[i])
+                    self.lu_c[i] = c[i] * self.inv_denom[i]
             
-            # RHS: 4y(n) - y(n-1)
-            rhs = 4.0 * self.y_prev - self.y_prev2
-            self.y = np.linalg.solve(M, rhs)
+            # Store current y as y_(n-1) for next step
+            y_nm1 = self.y.copy()
             
+            # RHS for BDF2
+            self.y = -2.0 * y_nm1 / self.dt + self.y_prev / (2.0*self.dt) - k
+            self.y_prev = y_nm1  # Current y becomes previous y
+            
+            # Forward substitution
+            N = len(self.y)
+            self.lu_d[0] = self.y[0] / self.lu_b[0]
+            for i in range(1, N):
+                self.lu_d[i] = (self.y[i] - self.lu_d[i-1]*a[i]) * self.inv_denom[i]
+            
+            # Back substitution
+            self.y[N-1] = self.lu_d[N-1]
+            for i in range(N-2, -1, -1):
+                self.y[i] = self.lu_d[i] - self.lu_c[i] * self.y[i+1]
+        
         self.step_count += 1
-        self.t += self.dt
-        self.ydot = self.system.get_rhs(self.t, self.y)
+        self.t += self.dt if self.step_count > 1 else self.dt/8.0
+        
+    def get_ydot(self) -> np.ndarray:
+        """Get current time derivative matching C++ implementation"""
+        if self.y is None:
+            return None
+            
+        # Get coefficients
+        a, b, c = self.system.get_coefficients()
+        k = self.system.get_rhs(self.t, self.y)
+        
+        N = len(self.y)
+        ydot = np.zeros(N)
+        
+        # Calculate ydot using tridiagonal system
+        ydot[0] = b[0]*self.y[0] + c[0]*self.y[1] + k[0]
+        for i in range(1, N-1):
+            ydot[i] = a[i]*self.y[i-1] + b[i]*self.y[i] + c[i]*self.y[i+1] + k[i]
+        ydot[N-1] = a[N-1]*self.y[N-2] + b[N-1]*self.y[N-1] + k[N-1]
+        
+        return ydot
+        
+    def resize(self, n: int) -> None:
+        """Resize the system to a new size"""
+        self.y = np.zeros(n)
+        self.y_prev = np.zeros(n)
+        self.lu_b = np.zeros(n)
+        self.lu_c = np.zeros(n)
+        self.lu_d = np.zeros(n)
+        self.inv_denom = np.zeros(n)
+        self.system.resize(n)
         
     def _build_matrix(self, a: np.ndarray, b: np.ndarray, 
                      c: np.ndarray, dt: float) -> np.ndarray:
@@ -162,3 +236,4 @@ class TridiagonalIntegrator(BaseIntegrator):
                 M[i,i+1] = -dt * c[i]
                 
         return M
+    

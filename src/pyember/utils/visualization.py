@@ -26,7 +26,7 @@ class FlameVisualizer:
         self.history['t'].append(self.flame.t)
         self.history['T'].append(self.flame.T.copy())
         self.history['Y'].append(self.flame.Y.copy())
-        self.history['V'].append(self.flame.convection.V.copy())
+        self.history['V'].append(self.flame.convection.U.copy())
 
     def plot_current_state(self, species_names: Optional[List[str]] = None):
         """
@@ -69,7 +69,7 @@ class FlameVisualizer:
         ax2.grid(True)
 
         # Velocity profile
-        ax3.plot(x, self.flame.convection.V, 'b-', label='Mass Flux')
+        ax3.plot(x, self.flame.convection.U, 'b-', label='Mass Flux')
         ax3.set_xlabel('Position [mm]')
         ax3.set_ylabel('Mass Flux [kg/m²/s]')
         ax3.legend()
@@ -104,6 +104,7 @@ class FlameVisualizer:
         else:
             species_indices = [self.flame.gas.species_index(name) 
                              for name in species_names]
+            print(species_indices)
 
         # Temperature limits
         T_min = min(np.min(T) for T in self.history['T'])
@@ -133,7 +134,7 @@ class FlameVisualizer:
                 ax2.plot(x, self.history['Y'][frame][k], label=name)
             ax2.set_ylabel('Mass Fraction')
             ax2.legend()
-            ax2.set_ylim(0, max(Y_max.values()) * 1.1)
+            #ax2.set_ylim(0, max(Y_max.values()) * 1.1)
 
             # Velocity
             ax3.plot(x, self.history['V'][frame], 'b-')

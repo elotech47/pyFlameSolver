@@ -1,201 +1,218 @@
 """
-test_grid.py: Unit tests for the grid system
+test_grid.py: Unit tests for the grid system matching C++ implementation
 """
 
 import pytest
 import numpy as np
-from pyember.core.grid import OneDimGrid, GridConfig
+from pyember.core.grid import OneDimGrid, GridConfig, BoundaryCondition
 
 
 @pytest.fixture
 def basic_grid():
     """Create a basic grid for testing"""
-    config = GridConfig(
-        x_min=0.0,
-        x_max=1.0,
-        n_points=5
-    )
-    return OneDimGrid(config)
+    grid = OneDimGrid()
+    grid.setOptions(GridConfig(
+        vtol=0.12,
+        dvtol=0.2,
+        gridMin=5e-7,
+        gridMax=2e-4,
+        uniformityTol=2.5,
+        boundaryTol=5e-5,
+        boundaryTolRm=1e-5,
+        addPointCount=3,
+        cylindricalFlame=False
+    ))
+    
+    # Initialize with 5 points
+    grid.x = np.linspace(0, 1, 5)
+    grid.setSize(5)
+    grid.dampVal = np.ones_like(grid.x)  # Initialize damping
+    grid.updateValues()
+    return grid
 
 
 def test_grid_initialization():
-    """Test basic grid initialization"""
+    """Test grid initialization matches C++ behavior"""
     grid = OneDimGrid()
-    assert grid.x is not None
-    assert len(grid.x) == grid.config.n_points
-    assert grid.x[0] == grid.config.x_min
-    assert grid.x[-1] == grid.config.x_max
+    grid.setOptions(GridConfig())
+    
+    # Check default flags
+    assert grid.updated is True
+    assert grid.leftBC == BoundaryCondition.FixedValue
+    assert grid.rightBC == BoundaryCondition.FixedValue
+    
+    # Check coordinate system defaults
+    assert grid.alpha == 0  # Planar by default
+    assert grid.beta == 1.0  # Standard strain metric
+    
+    # Check indices
+    assert grid.ju == 0  # Unburned index
+    assert grid.jb == 0  # Burned index
 
 
 def test_grid_metrics(basic_grid):
-    """Test computation of grid metrics"""
+    """Test computation of grid metrics matches C++"""
     grid = basic_grid
     
-    # Check grid spacing
-    assert len(grid.dx) == len(grid.x)
-    assert np.all(grid.dx[:-1] > 0)
+    # Check main grid arrays exist
+    assert grid.hh is not None  # Grid spacing
+    assert grid.cfm is not None  # Left coefficients
+    assert grid.cf is not None  # Center coefficients 
+    assert grid.cfp is not None  # Right coefficients
+    assert grid.rphalf is not None  # Radial coordinates at midpoints
     
-    # Check finite difference coefficients
-    assert len(grid.cf) == len(grid.x)
-    assert len(grid.cfm) == len(grid.x)
-    assert len(grid.cfp) == len(grid.x)
+    # Check sizes
+    assert len(grid.hh) == grid.jj  # One less than points
+    assert len(grid.rphalf) == grid.jj
+    assert len(grid.r) == grid.nPoints
     
-    # Interior points should sum to zero
-    for j in range(1, len(grid.x)-1):
-        assert abs(grid.cfm[j] + grid.cf[j] + grid.cfp[j]) < 1e-14
+    # Check grid spacing calculation
+    np.testing.assert_allclose(
+        grid.hh,
+        np.diff(grid.x)
+    )
+    
+    # For planar grid (alpha=0), rphalf should be ones
+    np.testing.assert_allclose(grid.rphalf, np.ones_like(grid.rphalf))
 
 
-def test_grid_adaptation():
-    """Test grid adaptation to solution features"""
-    grid = OneDimGrid(GridConfig(
-        x_min=0.0,
-        x_max=1.0,
-        n_points=20,
-        vtol=0.1,
-        dvtol=0.2,
-        grid_min=1e-4,
-        grid_max=0.1
-    ))
+def test_cylindrical_coordinates():
+    """Test cylindrical coordinate handling"""
+    grid = OneDimGrid()
+    config = GridConfig()
+    config.cylindricalFlame = True
+    grid.setOptions(config)
     
-    # Initial number of points
-    n_initial = len(grid.x)
+    # Initialize grid
+    grid.x = np.linspace(0, 1, 5)
+    grid.setSize(5)
+    grid.dampVal = np.ones_like(grid.x)
+    grid.updateValues()
     
-    # Create solution with sharp gradient
-    y = np.tanh((grid.x - 0.5) * 10)
+    # Check coordinate transformation
+    assert grid.alpha == 1  # Cylindrical
+    np.testing.assert_allclose(
+        grid.r,
+        grid.x  # For alpha=1, r should equal x
+    )
+    np.testing.assert_allclose(
+        grid.rphalf,
+        0.5*(grid.x[1:] + grid.x[:-1])  # Midpoint values
+    )
+
+
+def test_adaptation():
+    """Test grid adaptation with numpy arrays"""
+    grid = OneDimGrid()
+    grid.setOptions(GridConfig())
+    
+    # Initialize grid
+    grid.x = np.linspace(0, 1, 20)
+    grid.setSize(20)
+    grid.dampVal = np.ones_like(grid.x)
+    grid.updateValues()
+    
+    # Create test solution with sharp gradient
+    y1 = np.tanh((grid.x - 0.5) * 10)
+    y2 = 1 - y1
+    y = [y1.copy(), y2.copy()]  # Make copies to allow modification
+    
+    # Set adaptation parameters
+    grid.nAdapt = 2
+    grid.vtol = [0.12, 0.12]
+    grid.dvtol = [0.2, 0.2]
     
     # Adapt grid
-    modified = grid.adapt_grid(y)
+    modified = grid.adapt(y)
     
-    # Grid should be modified
     assert modified
-    
-    # Points should be within bounds
-    assert np.all(grid.x >= grid.config.x_min)
-    assert np.all(grid.x <= grid.config.x_max)
-    
-    # Grid spacing should respect limits
-    dx = np.diff(grid.x)
-    assert np.all(dx >= grid.config.grid_min)
-    assert np.all(dx <= grid.config.grid_max)
-    
-    # Should have more points near gradient
-    mid_points = np.logical_and(grid.x > 0.4, grid.x < 0.6)
-    n_mid_points = np.sum(mid_points)
-    assert n_mid_points > n_initial / 4  # At least 25% of points near gradient
-    
-    # Grid should be monotonic
-    assert np.all(np.diff(grid.x) > 0)
+    assert np.all(np.diff(grid.x) > 0)  # Check monotonicity
+    assert len(grid.x) > 20  # Should add points near gradient
 
 
-def test_cylindrical_grid():
-    """Test cylindrical coordinate transformation"""
-    grid = OneDimGrid(GridConfig(
-        cylindrical=True,
-        alpha=1
-    ))
+def test_boundary_handling():
+    """Test boundary condition handling"""
+    grid = OneDimGrid()
+    grid.setOptions(GridConfig())
     
-    assert grid.r is not None
-    assert len(grid.r) == len(grid.x)
-    # For alpha=1, r should equal x
-    np.testing.assert_array_almost_equal(grid.r, grid.x)
+    # Initialize grid
+    grid.x = np.linspace(0, 1, 10)
+    grid.setSize(10)
+    grid.dampVal = np.ones_like(grid.x)
+    grid.updateValues()
+    
+    # Test fixed value conditions
+    grid.leftBC = BoundaryCondition.FixedValue
+    grid.rightBC = BoundaryCondition.FixedValue
+    grid.fixedLeftLoc = True
+    
+    y = [np.sin(2*np.pi*grid.x)]  # Test solution
+    grid.nAdapt = 1
+    grid.vtol = [0.12]
+    grid.dvtol = [0.2]
+    
+    # Add points at right boundary
+    added = grid.addRight(y)
+    assert added
+    assert grid.x[-1] == 1.0  # Right boundary should stay fixed
+    
+    # Left boundary shouldn't move
+    added = grid.addLeft(y)
+    assert not added  # Should not add points due to fixedLeftLoc
 
 
-def test_grid_validation():
-    """Test grid configuration validation"""
-    # Invalid grid extent
-    config = GridConfig(x_min=1.0, x_max=0.0)
-    grid = OneDimGrid(config)
-    assert not grid.validate()
+def test_point_removal():
+    """Test point removal logic with proper criteria"""
+    grid = OneDimGrid()
+    grid.setOptions(GridConfig())
     
-    # Invalid number of points
-    config = GridConfig(n_points=1)
-    grid = OneDimGrid(config)
-    assert not grid.validate()
+    # Initialize with extra points
+    grid.x = np.linspace(0, 1, 30)
+    grid.setSize(30)
+    grid.dampVal = np.ones_like(grid.x)
+    grid.updateValues()
     
-    # Invalid grid spacing bounds
-    config = GridConfig(grid_min=-1.0)
-    grid = OneDimGrid(config)
-    assert not grid.validate()
-    
-    # Valid configuration
-    config = GridConfig()
-    grid = OneDimGrid(config)
-    assert grid.validate()
-
-
-def test_grid_neighbors(basic_grid):
-    """Test neighbor point identification"""
-    grid = basic_grid
-    
-    # Left boundary
-    left, right = grid.get_neighbors(0)
-    assert left == 0
-    assert right == 1
-    
-    # Interior point
-    left, right = grid.get_neighbors(2)
-    assert left == 1
-    assert right == 3
-    
-    # Right boundary
-    left, right = grid.get_neighbors(4)
-    assert left == 3
-    assert right == 4
-    
-def test_grid_quality_metrics():
-    """Test grid quality metrics"""
-    grid = OneDimGrid(GridConfig(
-        x_min=0.0,
-        x_max=1.0,
-        n_points=5,
-        uniformityTol=2.5
-    ))
-    
-    # Test uniform grid
-    metric = grid.uniformity_metric()
-    assert metric < 1.1  # Should be close to 1.0 for uniform grid
-    
-    # Test weight function
-    assert grid.grid_weight_function(0.5) > grid.grid_weight_function(0.1)
-    
-    # Test spacing check
-    assert not grid.check_spacing()  # Initial grid should be okay
-
-def test_boundary_extension():
-    """Test grid boundary extension"""
-    grid = OneDimGrid(GridConfig(
-        x_min=-2.0,
-        x_max=2.0,
-        n_points=20,
-        fixed_left_loc=False,
-        boundaryTol=0.1,
-        grid_max=0.2
-    ))
-
-    # Create solution with stronger gradient at boundary
-    y = 10 * np.exp(-(grid.x/0.5)**2)  # Narrower Gaussian
-    
-    # Extend boundaries
-    modified = grid.extend_boundaries(y)
-    assert modified  # Grid should be modified
-    
-    
-def test_error_estimation():
-    """Test error estimation"""
-    grid = OneDimGrid(GridConfig(
-        x_min=0.0,
-        x_max=1.0,
-        n_points=20
-    ))
-    
-    # Create solution with known features
+    # Create a solution that's very smooth near the boundary
     x = grid.x
-    y = np.sin(2 * np.pi * x)  # Simple periodic function
+    # Use a function that's nearly constant near x=1
+    y = [np.sin(np.pi*x/2) * np.exp(-(x-0.5)**2/0.1)]
     
-    # Compute error weights
-    weights = grid.compute_error_weights(y)
+    grid.nAdapt = 1
+    grid.vtol = [0.12]
+    grid.dvtol = [0.2]
+    grid.boundaryTolRm = 0.05  # Set removal tolerance
     
-    # Error should be larger where curvature is larger
-    assert np.max(weights) > 0
-    assert weights[0] == 0  # No error at boundaries
-    assert weights[-1] == 0
+    # Verify initial conditions
+    assert len(grid.x) == 30
+    
+    # Remove points
+    removed = grid.removeRight(y)
+    assert removed  # Should remove point from smooth region
+    assert len(grid.x) == 29  # Should have one less point
+    
+    # Check that remaining points maintain proper spacing
+    dx = np.diff(grid.x)
+    assert np.all(dx > 0)  # Still monotonic
+    assert np.all(dx >= grid.gridMin)  # Respect minimum spacing
+
+def test_grid_based():
+    """Test grid metrics inheritance"""
+    grid = OneDimGrid()
+    grid.setOptions(GridConfig())
+    
+    # Initialize
+    grid.x = np.linspace(0, 1, 5)
+    grid.setSize(5)
+    grid.dampVal = np.ones_like(grid.x)
+    grid.updateValues()
+    
+    # Check metric arrays
+    assert grid.hh is not None
+    assert grid.cfm is not None
+    assert grid.cf is not None
+    assert grid.cfp is not None
+    assert grid.rphalf is not None
+    
+    # Check coordinate parameters
+    assert hasattr(grid, 'alpha')
+    assert hasattr(grid, 'beta')
