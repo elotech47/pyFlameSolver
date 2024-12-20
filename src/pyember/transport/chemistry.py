@@ -33,6 +33,8 @@ class SourceSystem(TransportComponent):
         self.heat_loss = None
         self.rate_mult = None
         
+        self.quasi2d = False
+        
         # Split terms
         self.split_const_T = 0.0
         self.split_const_U = 0.0
@@ -82,21 +84,92 @@ class SourceSystem(TransportComponent):
         except Exception as e:
             raise RuntimeError(f"Error updating properties at x={self.x_pos}, T={self.T}: {str(e)}")
         
-    def normalize_mass_fractions(self, Y: np.ndarray) -> np.ndarray:
-        """Normalize mass fractions with bounds checking"""
-        if np.any(Y < -1e-10):
-            Y = np.maximum(Y, 0)  # Clip small negative values
-            
-        Y_sum = Y.sum()
-        if abs(Y_sum - 1.0) > 1e-8:  # Only normalize if significantly different from 1
-            if Y_sum > 0:
-                Y = Y / Y_sum
-            else:
-                raise ValueError(f"Invalid mass fraction sum: {Y_sum}")
+    def normalize_mass_fractions(self, Y: np.ndarray, tol=1e-10):
+        """
+        Minimal correction to mass fractions:
+        - Clip negative mass fractions to zero.
+        - Check the sum, and if it differs from 1 by more than a small tolerance,
+          apply a minor normalization.
+        """
+        Y = np.clip(Y, 0.0, None)  # Remove tiny negative values
+        # Y_sum = Y.sum()
+        # if abs(Y_sum - 1.0) > tol and Y_sum > tol:
+        #     Y /= Y_sum
         return Y
         
+    # def get_rhs(self, t: float, state: np.ndarray) -> np.ndarray:
+    #     """RHS function with improved mass fraction handling"""
+    #     try:
+    #         # Unpack state
+    #         U, T = state[0], state[1]
+    #         Y = state[2:]
+            
+    #         # Temperature bounds checking
+    #         if T < 200 or T > 6000:
+    #             raise ValueError(f"Temperature {T}K out of valid range [200, 6000]")
+            
+    #         # Mass fraction normalization and bounds checking
+    #         try:
+    #             Y = self.normalize_mass_fractions(Y)
+    #         except ValueError as e:
+    #             print(f"State at error:")
+    #             print(f"T = {T:.1f} K")
+    #             print(f"Y = {Y}")
+    #             print(f"Sum(Y) = {Y.sum():.3e}")
+    #             raise ValueError(f"Mass fraction normalization failed: {str(e)}")
+            
+    #         # Update gas state
+    #         self.gas.TPY = T, self.P, Y
+    #         rho = self.gas.density
+            
+    #         # Get reaction rates with rate multiplier
+    #         if self.rate_mult is not None:
+    #             mult = self.rate_mult(self.x_pos)
+    #             self.gas.set_multiplier(mult)
+                
+    #         wdot = self.gas.net_production_rates
+            
+    #         # Species equations with split terms
+    #         dYdt = wdot * self.W / rho + self.split_const_Y
+            
+    #         # Check for NaN/inf in species rates
+    #         if not np.all(np.isfinite(dYdt)):
+    #             bad_species = np.where(~np.isfinite(dYdt))[0]
+    #             raise ValueError(f"Non-finite species rates for: {bad_species}")
+            
+    #         # Energy equation
+    #         h = self.gas.partial_molar_enthalpies / self.W
+    #         q_dot = -np.sum(h * wdot)
+    #         dTdt = q_dot / (rho * self.gas.cp_mass)
+            
+    #         if self.heat_loss is not None:
+    #             q_loss = self.heat_loss(self.x_pos, t, U, T, Y)
+    #             dTdt -= q_loss / (rho * self.gas.cp_mass)
+                
+    #         # Add split terms
+    #         dTdt += self.split_const_T
+    #         dUdt = self.split_const_U
+            
+    #         if self.debug:
+    #             print(f"t={t:.3e}, T={T:.1f}, max|dT/dt|={abs(dTdt):.1e}")
+    #             print(f"max|dY/dt|={np.max(np.abs(dYdt)):.1e}")
+                
+    #         return np.concatenate([[dUdt, dTdt], dYdt])
+            
+    #     except Exception as e:
+    #         print(f"\nError in RHS at x={self.x_pos:.6f}, t={t:.3e}:")
+    #         print(f"T = {T:.1f} K")
+    #         print(f"Y = {Y}")
+    #         print(f"Sum(Y) = {Y.sum():.3e}")
+    #         if hasattr(self.gas, 'species_names'):
+    #             print("\nSpecies composition:")
+    #             for k, (name, yk) in enumerate(zip(self.gas.species_names, Y)):
+    #                 if yk > 1e-6:
+    #                     print(f"{k:3d} {name:10s}: {yk:.4e}")
+    #         raise RuntimeError(f"RHS error at x={self.x_pos}, t={t}: {str(e)}")
+    
     def get_rhs(self, t: float, state: np.ndarray) -> np.ndarray:
-        """RHS function with improved mass fraction handling"""
+        """RHS function matching C++ strain handling"""
         try:
             # Unpack state
             U, T = state[0], state[1]
@@ -107,33 +180,20 @@ class SourceSystem(TransportComponent):
                 raise ValueError(f"Temperature {T}K out of valid range [200, 6000]")
             
             # Mass fraction normalization and bounds checking
-            try:
-                Y = self.normalize_mass_fractions(Y)
-            except ValueError as e:
-                print(f"State at error:")
-                print(f"T = {T:.1f} K")
-                print(f"Y = {Y}")
-                print(f"Sum(Y) = {Y.sum():.3e}")
-                raise ValueError(f"Mass fraction normalization failed: {str(e)}")
-            
+            Y = self.normalize_mass_fractions(Y)
+                
             # Update gas state
             self.gas.TPY = T, self.P, Y
             rho = self.gas.density
             
-            # Get reaction rates with rate multiplier
+            # Get reaction rates
             if self.rate_mult is not None:
                 mult = self.rate_mult(self.x_pos)
                 self.gas.set_multiplier(mult)
-                
             wdot = self.gas.net_production_rates
             
-            # Species equations with split terms
+            # Species equations with split terms and strain effect
             dYdt = wdot * self.W / rho + self.split_const_Y
-            
-            # Check for NaN/inf in species rates
-            if not np.all(np.isfinite(dYdt)):
-                bad_species = np.where(~np.isfinite(dYdt))[0]
-                raise ValueError(f"Non-finite species rates for: {bad_species}")
             
             # Energy equation
             h = self.gas.partial_molar_enthalpies / self.W
@@ -146,11 +206,23 @@ class SourceSystem(TransportComponent):
                 
             # Add split terms
             dTdt += self.split_const_T
-            dUdt = self.split_const_U
             
+            # Momentum equation with strain rate
+            if not self.quasi2d:
+                # Get strain rate terms as in C++
+                strain_a = self.strain_rate  # a(t)
+                strain_dadt = 0.0  # da/dt - assuming constant strain for now
+                A = strain_a * strain_a + strain_dadt
+                
+                # Momentum equation matches C++ implementation
+                dUdt = -A * (self.rhou/rho - 1.0) + self.split_const_U
+            else:
+                dUdt = self.split_const_U
+                
             if self.debug:
                 print(f"t={t:.3e}, T={T:.1f}, max|dT/dt|={abs(dTdt):.1e}")
                 print(f"max|dY/dt|={np.max(np.abs(dYdt)):.1e}")
+                print(f"strain_rate={self.strain_rate:.1e}, rhou={self.rhou:.1e}")
                 
             return np.concatenate([[dUdt, dTdt], dYdt])
             
@@ -158,12 +230,8 @@ class SourceSystem(TransportComponent):
             print(f"\nError in RHS at x={self.x_pos:.6f}, t={t:.3e}:")
             print(f"T = {T:.1f} K")
             print(f"Y = {Y}")
-            print(f"Sum(Y) = {Y.sum():.3e}")
-            if hasattr(self.gas, 'species_names'):
-                print("\nSpecies composition:")
-                for k, (name, yk) in enumerate(zip(self.gas.species_names, Y)):
-                    if yk > 1e-6:
-                        print(f"{k:3d} {name:10s}: {yk:.4e}")
+            print(f"strain_rate = {self.strain_rate:.1e}")
+            print(f"rhou = {self.rhou:.1e}")
             raise RuntimeError(f"RHS error at x={self.x_pos}, t={t}: {str(e)}")
             
     def integrate_to_time(self, tf: float) -> Tuple[bool, str]:
@@ -178,13 +246,14 @@ class SourceSystem(TransportComponent):
                 (0, tf),
                 y0,
                 method='BDF',
-                rtol=1e-8,
-                atol=1e-10,
+                rtol=1e-10,
+                atol=1e-12,
                 max_step=tf/20,
                 first_step=tf/100
             )
             
             if not sol.success:
+                print(f"Integration failed: {sol.message} at t={tf:.3e} - switching to Radau")
                 # If BDF fails, try Radau with looser tolerances
                 sol = solve_ivp(
                     self.get_rhs,

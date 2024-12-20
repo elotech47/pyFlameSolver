@@ -581,6 +581,7 @@ class DiffusionFlame:
         self.Y = self.convection.Y
         self.V = self.convection.utw_system.V
         
+        
     def _finish_step(self):
         """Complete time step with grid adaptation"""
         # Advance time
@@ -595,7 +596,6 @@ class DiffusionFlame:
         #     self.n_regrid = 0
             
         self.n_regrid += 1
-
     
     def _adapt_grid(self):
         """Adapt grid to solution"""
@@ -645,7 +645,7 @@ class DiffusionFlame:
                 integrator.set_y0(self.Y[k])
                 integrator.initialize(self.t, self.dt)
             
-    
+
     def _update_grid_damping(self):
         """Update grid damping values"""
         # Resize dampVal to match grid size
@@ -698,13 +698,48 @@ class DiffusionFlame:
         split_diff[1] += self.cross_terms.dUdt_cross  # Momentum
         split_diff[2:] += self.cross_terms.dYdt_cross  # Species
         
+    # def _apply_production(self, dt: float):
+    #     for j, system in enumerate(self.source_systems):
+    #         try:
+    #             # Initialize with current state
+    #             system.initialize(self.T[j], self.U[j], self.Y[:,j])
+                
+    #             # Set split constants
+    #             split_prod = self.split_constants.get_split_constants('production')
+    #             system.split_const_T = split_prod[0,j]
+    #             system.split_const_U = split_prod[1,j]
+    #             system.split_const_Y = split_prod[2:,j]
+                
+    #             # Integrate
+    #             success, stats = system.integrate_to_time(dt)
+    #             if success:
+    #                 self.U[j] = system.U
+    #                 self.T[j] = system.T
+    #                 self.Y[:,j] = system.Y
+    #             else:
+    #                 print(f"\nIntegration failed at point j={j} (x={self.grid.x[j]:.6f}):")
+    #                 print(f"Initial state:")
+    #                 print(f"T = {self.T[j]:.1f} K")
+    #                 for k, name in enumerate(self.gas.species_names):
+    #                     if self.Y[k,j] > 1e-6:
+    #                         print(f"{name:10s}: {self.Y[k,j]:.4e}")
+    #                 print(f"\nError: {stats}")
+                    
+    #         except Exception as e:
+    #             print(f"Fatal error at point j={j}: {str(e)}")
+    #             raise
+    
     def _apply_production(self, dt: float):
         for j, system in enumerate(self.source_systems):
             try:
+                # Set strain rate and density terms
+                system.strain_rate = self.strain_rate 
+                system.rhou = self.rho[0]  # Unburned density
+                
                 # Initialize with current state
                 system.initialize(self.T[j], self.U[j], self.Y[:,j])
                 
-                # Set split constants
+                # Set split constants 
                 split_prod = self.split_constants.get_split_constants('production')
                 system.split_const_T = split_prod[0,j]
                 system.split_const_U = split_prod[1,j]
@@ -717,9 +752,9 @@ class DiffusionFlame:
                     self.T[j] = system.T
                     self.Y[:,j] = system.Y
                 else:
-                    print(f"\nIntegration failed at point j={j} (x={self.grid.x[j]:.6f}):")
-                    print(f"Initial state:")
-                    print(f"T = {self.T[j]:.1f} K")
+                    print(f"Integration failed at j={j}, x={self.grid.x[j]:.6f}:")
+                    print(f"strain_rate={system.strain_rate:.1e}")
+                    print(f"rhou={system.rhou:.1e}")
                     for k, name in enumerate(self.gas.species_names):
                         if self.Y[k,j] > 1e-6:
                             print(f"{name:10s}: {self.Y[k,j]:.4e}")
