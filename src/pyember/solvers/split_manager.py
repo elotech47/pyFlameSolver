@@ -44,6 +44,7 @@ class SplitConstantsManager:
             # Production split constants
             self.split_prod = 0.5 * (self.ddt_conv + self.ddt_diff + 
                                    self.ddt_cross - self.ddt_prod)
+            
         else:
             # Simple splitting - cross terms in diffusion
             self.split_diff = self.ddt_cross

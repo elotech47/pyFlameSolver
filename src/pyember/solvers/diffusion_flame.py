@@ -16,6 +16,8 @@ from .integrator import TridiagonalIntegrator
 from .cross_system import CrossTermSystem
 from .split_manager import SplitConstantsManager
 from scipy.integrate import solve_ivp
+from scipy.integrate import ode
+import time
 
 
 @dataclass
@@ -112,6 +114,27 @@ class DiffusionFlame:
         self.dt = 0.0
         self.t_regrid = 0.0
         self.n_regrid = 0
+        
+        self.info = {
+            "diffusion": {
+                'cpu_time': 0.0,
+                'max_dT': {'value': 0.0, 'location': None, 'time': None},
+                'max_dY': {'value': 0.0, 'species': None, 'location': None, 'time': None},
+                'call_count': 0
+            },
+            "convection": {
+                'cpu_time': 0.0,
+                'max_dT': {'value': 0.0, 'location': None, 'time': None},
+                'max_dY': {'value': 0.0, 'species': None, 'location': None, 'time': None},
+                'call_count': 0
+            },
+            "production": {
+                'cpu_time': 0.0,
+                'max_dT': {'value': 0.0, 'location': None, 'time': None},
+                'max_dY': {'value': 0.0, 'species': None, 'location': None, 'time': None},
+                'call_count': 0
+            }
+        }
         
         # Initialize solution
         self.initialize()
@@ -302,14 +325,39 @@ class DiffusionFlame:
         # Update transport properties
         self.update_properties()
         
+    def _update_process_info(self, process: str, delta: np.ndarray, t: float):
+        """Update performance metrics for a given process"""
+        # Temperature changes
+        dT = np.abs(delta[0])
+        max_dT = np.max(dT)
+        if max_dT > self.info[process]['max_dT']['value']:
+            self.info[process]['max_dT'].update({
+                'value': max_dT,
+                'location': self.grid.x[np.argmax(dT)],
+                'time': t
+            })
+            print(f"Updated max_dT for {process} at t = {t} to {max_dT} at x = {self.grid.x[np.argmax(dT)]}")
+
+        # Species changes
+        dY = np.abs(delta[2:])
+        max_dY = np.max(dY)
+        if max_dY > self.info[process]['max_dY']['value']:
+            max_idx = np.unravel_index(np.argmax(dY), dY.shape)
+            self.info[process]['max_dY'].update({
+                'value': max_dY,
+                'species': self.gas.species_names[max_idx[0]],
+                'location': self.grid.x[max_idx[1]],
+                'time': t
+            })
+            
+        self.info[process]['call_count'] += 1
+
     def step(self, dt: float):
-        """Step implementation matching C++ SplitSolver exactly"""
+        """Enhanced step implementation with detailed performance tracking"""
         self.dt = min(dt, 1e-3)
         
         # Setup step
         self._setup_step()
-        
-        # Store initial state
         state_0 = np.vstack([self.T, self.U, self.Y])
         
         self.split_constants.calculate_split_constants(
@@ -317,56 +365,85 @@ class DiffusionFlame:
         
         # First quarter diffusion
         self._setup_cross_terms()
-        print("First quarter diffusion")
-        self._apply_diffusion(0.25 * self.dt)  # 1/4 step
+        start_time = time.time()
+        self._apply_diffusion(0.25 * self.dt)
+        self.info['diffusion']['cpu_time'] += time.time() - start_time
         delta_diff = np.vstack([self.T, self.U, self.Y]) - state_0
+        self._update_process_info('diffusion', delta_diff, self.t)
         
         # First half convection
         state_pre_conv = np.vstack([self.T, self.U, self.Y])
-        print("First half convection")
-        self._apply_convection(0.5 * self.dt)  # 1/2 step
+        start_time = time.time()
+        self._apply_convection(0.5 * self.dt)
+        self.info['convection']['cpu_time'] += time.time() - start_time
         delta_conv = np.vstack([self.T, self.U, self.Y]) - state_pre_conv
+        self._update_process_info('convection', delta_conv, self.t)
         
         # Second quarter diffusion
         state_pre_diff = np.vstack([self.T, self.U, self.Y])
         self._setup_cross_terms()
-        print("Second quarter diffusion")
-        self._apply_diffusion(0.25 * self.dt)  # 2/4 step
+        start_time = time.time()
+        self._apply_diffusion(0.25 * self.dt)
+        self.info['diffusion']['cpu_time'] += time.time() - start_time
         delta_diff += np.vstack([self.T, self.U, self.Y]) - state_pre_diff
+        self._update_process_info('diffusion', delta_diff, self.t)
         
         # Full production step
         state_pre_prod = np.vstack([self.T, self.U, self.Y])
-        print("Full production step")
-        self._apply_production(self.dt)  # Full step
+        start_time = time.time()
+        self._apply_production(self.dt)
+        self.info['production']['cpu_time'] += time.time() - start_time
         delta_prod = np.vstack([self.T, self.U, self.Y]) - state_pre_prod
+        self._update_process_info('production', delta_prod, self.t)
         
         # Third quarter diffusion
         state_pre_diff = np.vstack([self.T, self.U, self.Y])
         self._setup_cross_terms()
-        print("Third quarter diffusion")
-        self._apply_diffusion(0.25 * self.dt)  # 3/4 step
+        start_time = time.time()
+        self._apply_diffusion(0.25 * self.dt)
+        self.info['diffusion']['cpu_time'] += time.time() - start_time
         delta_diff += np.vstack([self.T, self.U, self.Y]) - state_pre_diff
+        self._update_process_info('diffusion', delta_diff, self.t)
         
         # Second half convection
         state_pre_conv = np.vstack([self.T, self.U, self.Y])
-        print("Second half convection")
-        self._apply_convection(0.5 * self.dt)  # 2/2 step
+        start_time = time.time()
+        self._apply_convection(0.5 * self.dt)
+        self.info['convection']['cpu_time'] += time.time() - start_time
         delta_conv += np.vstack([self.T, self.U, self.Y]) - state_pre_conv
+        self._update_process_info('convection', delta_conv, self.t)
         
         # Final quarter diffusion
         state_pre_diff = np.vstack([self.T, self.U, self.Y])
         self._setup_cross_terms()
-        print("Final quarter diffusion")
-        self._apply_diffusion(0.25 * self.dt)  # 4/4 step
+        start_time = time.time()
+        self._apply_diffusion(0.25 * self.dt)
+        self.info['diffusion']['cpu_time'] += time.time() - start_time
         delta_diff += np.vstack([self.T, self.U, self.Y]) - state_pre_diff
+        self._update_process_info('diffusion', delta_diff, self.t)
         
         # Update split constants
         self.split_constants.update_derivatives(
             delta_conv, delta_diff, delta_prod, self.dt)
-        
             
         # Complete step
         self._finish_step()
+        
+    def get_performance_summary(self):
+        """Get a formatted summary of performance metrics"""
+        summary = []
+        for process, metrics in self.info.items():
+            summary.append(f"\n{process.upper()} Process:")
+            summary.append(f"CPU Time: {metrics['cpu_time']:.3f} s")
+            summary.append(f"Call Count: {metrics['call_count']}")
+            summary.append(f"Max Temperature Change: {metrics['max_dT']['value']:.2e} K")
+            summary.append(f"  at x = {metrics['max_dT']['location']:.3e} m")
+            summary.append(f"  at t = {metrics['max_dT']['time']:.3e} s")
+            summary.append(f"Max Species Change: {metrics['max_dY']['value']:.2e}")
+            summary.append(f"  Species: {metrics['max_dY']['species']}")
+            summary.append(f"  at x = {metrics['max_dY']['location']:.3e} m")
+            summary.append(f"  at t = {metrics['max_dY']['time']:.3e} s")
+        return "\n".join(summary)
         
     def _setup_step(self):
         """Setup before integration"""
@@ -409,6 +486,19 @@ class DiffusionFlame:
         self.convection.utw_system.T = self.T
         self.convection.utw_system.U = self.U
         self.convection.Y = self.Y
+
+        # Calculate density derivatives 
+        ddt_total = self.split_constants.ddt_conv + self.split_constants.ddt_diff + self.split_constants.ddt_prod
+        ddt_total += self.split_constants.ddt_cross
+            
+        # Calculate drhodt exactly as in C++
+        tmp = np.sum(ddt_total[2:] / self.gas.molecular_weights[:, np.newaxis], axis=0)
+        drho_dt = -self.rho * (ddt_total[0] / self.T + tmp * self.convection.utw_system.Wmx)
+
+        # Update convection system
+        self.convection.utw_system.drho_dt = drho_dt
+
+        # Update molecular weights
         for j in range(len(self.grid.x)):
             self.gas.TPY = self.T[j], self.config.pressure, self.Y[:,j]
             self.convection.utw_system.Wmx[j] = self.gas.mean_molecular_weight
@@ -609,41 +699,49 @@ class DiffusionFlame:
         split_diff[2:] += self.cross_terms.dYdt_cross  # Species
         
     def _apply_production(self, dt: float):
-        """Apply chemical production step"""
-        # Set source system states
         for j, system in enumerate(self.source_systems):
-            system.initialize(self.T[j], self.U[j], self.Y[:,j])
-            
-        # Set split constants
-        split_prod = self.split_constants.get_split_constants('production')
-        for j, system in enumerate(self.source_systems):
-            system.split_const_T = split_prod[0,j]
-            system.split_const_U = split_prod[1,j]
-            system.split_const_Y = split_prod[2:,j]
-            
-        # Integrate each point
-        for j, system in enumerate(self.source_systems):
-            # Create state vector
-            y0 = np.concatenate([[self.U[j], self.T[j]], self.Y[:,j]])
-            
-            # Integrate
-            sol = solve_ivp(
-                system.get_rhs,
-                (0, dt),
-                y0,
-                method='LSODA',
-                rtol=1e-6,
-                atol=1e-8
-            )
-            
-            if sol.success:
-                # Update solution
-                self.U[j] = sol.y[0,-1]
-                self.T[j] = sol.y[1,-1]
-                self.Y[:,j] = sol.y[2:,-1]
-            else:
-                print(f"Production integration failed at point {j}")
+            try:
+                # Initialize with current state
+                system.initialize(self.T[j], self.U[j], self.Y[:,j])
                 
+                # Set split constants
+                split_prod = self.split_constants.get_split_constants('production')
+                system.split_const_T = split_prod[0,j]
+                system.split_const_U = split_prod[1,j]
+                system.split_const_Y = split_prod[2:,j]
+                
+                # Integrate
+                success, stats = system.integrate_to_time(dt)
+                if success:
+                    self.U[j] = system.U
+                    self.T[j] = system.T
+                    self.Y[:,j] = system.Y
+                else:
+                    print(f"\nIntegration failed at point j={j} (x={self.grid.x[j]:.6f}):")
+                    print(f"Initial state:")
+                    print(f"T = {self.T[j]:.1f} K")
+                    for k, name in enumerate(self.gas.species_names):
+                        if self.Y[k,j] > 1e-6:
+                            print(f"{name:10s}: {self.Y[k,j]:.4e}")
+                    print(f"\nError: {stats}")
+                    
+            except Exception as e:
+                print(f"Fatal error at point j={j}: {str(e)}")
+                raise
+
+    def _fallback_integration(self, system, y0, dt):
+        """Fallback integration with simpler method"""
+        return solve_ivp(
+            system.get_rhs,
+            (0, dt),
+            y0,
+            method='Radau',  # More stable implicit method
+            rtol=1e-6,
+            atol=1e-8,
+            max_step=dt/5,
+            first_step=dt/20
+        )    
+    
     def _update_auxiliary_properties(self):
         """Update auxiliary properties needed for cross terms"""
         n_points = len(self.grid.x)

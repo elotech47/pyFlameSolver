@@ -18,7 +18,8 @@ class FlameVisualizer:
             't': [],
             'T': [],
             'Y': [],
-            'V': []
+            'V': [],
+            'U': []
         }
 
     def save_state(self):
@@ -26,7 +27,8 @@ class FlameVisualizer:
         self.history['t'].append(self.flame.t)
         self.history['T'].append(self.flame.T.copy())
         self.history['Y'].append(self.flame.Y.copy())
-        self.history['V'].append(self.flame.convection.U.copy())
+        self.history['V'].append(self.flame.V.copy())
+        self.history['U'].append(self.flame.U.copy())
 
     def plot_current_state(self, species_names: Optional[List[str]] = None):
         """
@@ -69,7 +71,7 @@ class FlameVisualizer:
         ax2.grid(True)
 
         # Velocity profile
-        ax3.plot(x, self.flame.convection.U, 'b-', label='Mass Flux')
+        ax3.plot(x, self.flame.U, 'b-', label='Mass Flux')
         ax3.set_xlabel('Position [mm]')
         ax3.set_ylabel('Mass Flux [kg/m²/s]')
         ax3.legend()

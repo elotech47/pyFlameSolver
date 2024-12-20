@@ -1369,6 +1369,12 @@ class ConvectionSystemSplit:
         if self.n_spec > 0:
             self.W = np.array(gas.molecular_weights)
         
+    def update_state(self):
+        self.T = self.utw_system.T
+        self.U = self.utw_system.U
+        self.V = self.utw_system.V
+        self.Wmx = self.utw_system.Wmx
+        
             
     def integrate_to_time(self, tf: float):
         """Integrate convection system matching C++ implementation"""
@@ -1391,7 +1397,7 @@ class ConvectionSystemSplit:
                 self.utw_system.f,
                 (self.t, tf),
                 y_utw,
-                method='LSODA',  # Similar to CVODE Adams
+                method='BDF',  # Similar to CVODE Adams
                 rtol=self.rel_tol,
                 atol=[self.abs_tol_T]*self.n_points + 
                      [self.abs_tol_U]*self.n_points + 
@@ -1408,6 +1414,9 @@ class ConvectionSystemSplit:
                 
             # Update final state
             self.utw_system.unroll_y(solver.y[:,-1])
+            # Update final state
+            self.update_state()
+            
             
         # Species integration (can be parallel)
         self.species_timer = time.time()
@@ -1430,5 +1439,7 @@ class ConvectionSystemSplit:
                 self.Y[k] = sol.y[:,-1]
             else:
                 print(f"Species {k} integration failed")
-                
+        
+        
+        
         self.t = tf
